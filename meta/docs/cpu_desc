@@ -1,0 +1,599 @@
+    At a glance, this is a vCPU with sixteen general purpose registers and a relatively 
+minimal instruction set. The purpose of this vCPU is to allow microcontroller units that 
+cannot execute instructions from RAM (this is very common, such as in the AVR and PIC 
+microcontrollers) to achieve loading and running programs from a storage device without the 
+need to reprogram the MCU itself. Because these MCUs cannot run code from RAM, an 
+interpreter is necessary. The vCPU is a 16 bit CPU with 32 bit addressing modes. I chose 
+this as the best compromise between a variety of factors; namely, allowing an 8-bit MCU to 
+host this vCPU while not requiring an excessive amount of read/write cycles for every 
+operation, allowing at least 256K RAM (for which at least 20 bit addressing modes are 
+necessary), and giving benefit to running an interpreter for this vCPU on processors as wide
+as 32 bits (notably the ESP8266, which has become increasingly popular as of late). Many 
+aspects of the vCPU are aimed at making the interpreter easy to implement on as many 
+platforms as possible. For example, the vCPU has no concept of a system bus (unless you give
+it one); the vCPU simply reads and writes data to and from hardware devices in a way similar
+to the UNIX concept of "files" and expects the interpreter to know what to do with it. This 
+even includes main memory. This makes it easier for the interpreter to store the vCPU's main
+memory in its own memory, or perhaps on a physical memory chip, or perhaps on an SD card 
+over the SPI bus, or some combination of these methods. The vCPU doesn't care so long as it 
+can read and write data to it. There's no need to do time-sensitive things like bit bashing 
+a data bus from within the vCPU, which would be quite difficult. The interpreter only needs 
+to provide the vCPU with a virtual device it can read and write to, then it can handle all 
+the nuisances of real hardware on the real CPU.
+
++------------------------------------------------------------------------------------------+
+REGISTERS       | Desc (Note: 16 bit word size)
++------------------------------------------------------------------------------------------+
+0x0 through 0xF | 16 general purpose registers (R0 through RF)
+0x10:0x11       | Program Counter (PC)
+0x12            | Flags (FF)
+0x13            | Carry (CC)
+0x14:0x15       | 32 bit Stack Pointer (SP)
+0x16:0x17       | 32 bit Stack Base Pointer (BP)
+0x18:0x19       | 32 bit Function Pointer for CALL and RET (FP)
+0x1a            | Hardware Protection Flags (PF)
++------------------------------------------------------------------------------------------+
+
+    This vCPU is a Big Endian CPU. This makes the most sense when interpreting instructions
+from memory. If you're writing an interpreter, be mindful of endianness when forwarding
+a character stream from within the vCPU to a physical device that may expect little endian.
+    This document also describes some aspects of the default assembler I will write for this
+vCPU. The next immediate goal after achieving a functional interpreter and assembler is to 
+create a rudimentary C99 compiler for this vCPU architecture.
+
+    The vCPU supports three permission level rings of hardware protection, with additional
+memory protection mechanisms that must be implemented by the virtual CPU. See the interrupt
+table below.
+
++------------------------------------------------------------------------------------------+
+Hardware Protection Flags Register
++------------------------------------------------------------------------------------------+
+Value              | Ring   | Desc
++------------------------------------------------------------------------------------------+
+0b0000000000000000 | Ring 0 | Kernel mode; full access to memory and all devices.
+0b0000000000000001 | Ring 1 | Device driver mode; full access to some devices EXCEPT main
+                            |   memory.
+0b0000000000000010 | Ring 2 | User mode; no access to devices. Should only be allowed to
+                            |   access its own stack (see interrupts). Implement syscalls
+                            |   in ring 0 code for device access.
+------------------ | Ring A | Ring Alpha - this is the interpreter. Considered a ring
+                            |   because the interpreter has full access to memory, and
+                            |   handles the actual hardware the vCPU interacts with, much
+                            |   like a more typical device driver. The vCPU has no concept
+                            |   of Ring Alpha, however.
++------------------------------------------------------------------------------------------+
+
+    A note about Ring 1, device driver mode: ring 1 instructions may be given full access to
+all devices, but this is dangerous. Instead, define what devices the relevant ring 1
+instructions pertain to, and supply a whitelist of devices it may operate on. See the
+interrupt table below.
+
++------------------------------------------------------------------------------------------+
+INSTRUCTIONS | Legend: Ry     | Destination register operand (y can be 0 through F)
+             |         Rx     | Source register operand (x can be 0 through F)
+             |         D      | Flag indicating if the address is 16 (0) or 32 (1) bits.
+             |                |     Usually occupies a nibble, in which case D is the least
+             |                |     significant bit. Note that regardless of D, the
+             |                |     object file will always contain four bytes (32 bits)
+             |                |     for the address. D simply indicates if it can be
+             |                |     assumed the the most signifcant two bytes are zero,
+             |                |     possibly avoiding unnecessary read/write cycles.
+             |         S      | Nibble containing two flags. The two most significant bits 
+             |                |     indicate whether to load/write from/into the most or 
+             |                |     least significant byte of a register. 00 = l = least 
+             |                |     significant, 01 = h = most significant. For example, RFh
+             |                |     is the most significant byte of the Register RF. The 
+             |                |     least significant bit of S indicates if the address is 
+             |                |     16 or 32 bits, the same way D does.
+             |                |     In some cases, the two most significant bits may be used
+             |                |     to indicate using the LSB (00), MSB (01), or both (11).
+             |                |     This will correspond to both the register and the word
+             |                |     at an address if applicable.
+             |         R      | The third bit in the least signifcant nibble of either D or
+             |                |     S. Used to indicate if a 32 bit number is absolute (0)
+             |                |     or a relocatable address (1). Interpreters can safely
+             |                |     ignore this; it is a flag for the linker.
+             |         L      | Preprocessor label pointing to a word at a 16 bit or 32 bit
+             |                |     address. Labels may only point to words whose addresses
+             |                |     are known at compile time; Otherwise, LOD and/or POP
+             |                |     should be used to move the word into a register first.
+             |                |     Alternatively, a literal number may be used instead of
+             |                |     a label pointing to a word. Brackets denote when the
+             |                |     word the label is pointing to should be used, rather
+             |                |     than the value of the label pointer itself.
+             |         8N     | An 8 bit number. If prefixed with 0x, it's in hex.
+             |         16N    | Same as above, but 16 bits.
+             |         32N    | Same as above, but 32 bits.
+             |         RL     | Register, Label, or Literal. Always assumed to be the value
+             |                |     contained by the register or the value pointed to by
+             |                |     the label if applicable.
+             |         ADR    | An address of either 16 or 32 bits in length. Can be
+             |                |     represented by a literal or a [label].
++------------------------------------------------------------------------------------------+
+
+    These are the basic opcodes that define this virtual CPU. All instructions can be 
+identified from the first byte. The total size in words can be identified from the second
+byte.  When two registers are involved, the DESTINATION register will always be the upper 
+nibble of a byte, and the SOURCE register will always be the lower nibble of a byte. When 
+only one register is involved, the register will always be in the upper nibble.
+    Note: # represents the maximum number of words in the instruction in the below table.
+
++------------------------------------------------------------------------------------------+
+Basic Opcodes (0x00 through 0xEF)
++------------------------------------------------------------------------------------------+
+# | Code | Options    | Mnemonic    | Description
++------------------------------------------------------------------------------------------+
+1 | 0x00 | 0x00       | NOP         | No Instruction
+- | ---- | ----       | SET Ry, RL  | Preprocessor directive replaced by either SER or SEW
+                                    |   depending on if RL is a register, label, or literal.
+                                    |   (Aliases: MOV, CPY).
+1 | 0x01 | 0xYX       | SER Ry, Rx  | Sets Ry to the value of Rx.
+2 | 0x02 | 0xY0 0x16N | SEW Ry, L   | Sets Ry to the literal or [label] value L.
+1 | 0x03 | 0xYX       | ADD Ry, Rx  | Sets Ry to Ry+Rx. If an overflow occurs, Ry is set to
+                                    |   the least significant 16 bits, and CC is set to 1.
+                                    |   Otherwise, CC is 0.
+1 | 0x04 | 0xYX       | ADC Ry, Rx  | Sets Ry to Ry+Rx+CC. CC is set to 0x0000. 
+                                    |   (Alias: ADDC)
+1 | 0x05 | 0xYX       | SUB Ry, Rx  | Sets Ry to Ry-Rx. If an underflow occurs, CC is set
+                                    |   to 0x0001. Otherwise, CC is 0x0000. (Alias: SUBB).
+1 | 0x06 | 0xYX       | SBB Ry, Rx  | Sets Ry to Ry-(Rx+CC). CC is set to 0x0000.
+1 | 0x07 | 0xYX       | MUL Ry, Rx  | Sets Ry to Ry*Rx. If an overflow occurs, Ry is set to
+                                    |   the least significant 16 bits, and CC is set to the
+                                    |   most significant 16 bits. Otherwise, CC is 0.
+1 | 0x08 | 0xYX       | DIV Ry, Rx  | Sets Ry to Ry/Rx. If Rx contains the value 0, Ry is
+                                    |   set to 0, and CC is set to 1. Otherwise CC is 0.
+                                    |   Results are rounded towards 0.
+1 | 0x09 | 0xYX       | MLS Ry, Rx  | Same as MUL, but Ry and Rx are assumed to contain
+                                    |   signed numbers (two's complement). (Alias: MULS).
+1 | 0x0a | 0xYX       | DVS Ry, Rx  | Same as DIV, but Ry and Rx are assumed to contain
+                                    |   signed numbers. (Alias: DIVS).
+1 | 0x0b | 0xYX       | AND Ry, Rx  | Sets Ry to Ry&Rx.
+1 | 0x0c | 0xYX       | BOR Ry, RX  | Sets Ry to Ry|Rx. (Alias: OR)
+1 | 0x0d | 0xYX       | XOR Ry, Rx  | Sets Ry to Ry^Rx.
+1 | 0x0e | 0xYX       | NOT Ry, Rx  | Sets Ry to Ry~Rx.
+1 | 0x0f | 0xYX       | SHR Ry, Rx  | Sets Ry to Ry>>Rx.
+1 | 0x10 | 0xYX       | SHL Ry, Rx  | Sets Ry to Ry<<Rx
+1 | 0x11 | 0xYX       | ASR Ry, Rx  | Sets Ry to Ry>>>Rx (logical shift for signed values).
+1 | 0x12 | 0xYX       | ASL Ry, Rx  | Sets Ry to Ry<<<Rx.
+1 | 0x13 | 0xYX       | ROR Ry, Rx  | Sets the 15 least significant bits of Ry to Ry>>Rx,
+                                    |   and the most significant bit of Ry to what was
+                                    |   formerly the least significant bit of Ry.
+1 | 0x14 | 0xYX       | ROL Ry, Rx  | Sets the 15 most significant bits of Ry to Ry<<Rx,
+                                    |   and the least significant bit of Ry to what was
+                                    |   formerly the most significant bit of Ry.
+- | ---- | ----       | CLR Ry      | Preprocessor directive that replaces “CLR Ry” with
+                                    |   “XOR Ry, Ry”.
+3 | 0x15 | 0xYS 0xADR | LOD RyS,ADR | Load a word from the address ADR into Ry. If S is not
+                                    |   0b0011, S indicates whether to load the MSB or LSB
+                                    |   of the word into the LSB of Ry. (Alias: LOAD).
+3 | 0x16 | 0xYS 0xADR | STR RyS,ADR | Store a word from Ry in the address ADR.
+2 | 0x17 | 0xYS 0x00  | LAA RyS,    | Sets Ry to the word contained at the address Rw:Rx.
+                0xWX  |     Rw, Rx  |   (Aliases: LODAADR, LOADAADR). S indicates whether
+                                    |   to use the MSB, LSB, or both bytes of both the
+                                    |   register and the word at address Rw:Rx.
+2 | 0x18 | 0xYS 0x00  | SAA RyS,    | Sets the word at Rw:Rx to the value of Ry.
+                0xWX  |     Rw, Rx  |   (Alias: STRAADR).
+- | ---- | ----       | CMP Ry, RL  | Compare Ry to RL. If they're equal, FF is set to 0x00.
+                                    |   If Ry is greater than RL, FF is set to 0x01.
+                                    |   If Ry is less than RL, FF is set to 0x02.
+                                    |   Replaced by CMR or CMW depending on if RL is a
+                                    |   register, label, or literal. Values are assumed to
+                                    |   be unsigned.
+1 | 0x19 | 0xYX       | CMR Ry, Rx  | Compare Ry to Rx.
+2 | 0x1a | 0xY0 0x16N | CMW Ry, L   | Compare Ry to a 16 bit literal or [label].
+- | ---- | ----       | CMS Ry, RL  | Compare Ry to RL assuming signed values. Preprocessor
+                                    |   directive replaced by CSR or CSW depending on if RL
+                                    |   is a register, literal, or [label]. (Alias: CMPS).
+1 | 0x1b | 0xYX       | CSR Ry, Rx  | Compare Ry to Rx assuming signed values.
+2 | 0x1c | 0xY0 0x16N | CSW Ry, L   | Compare Ry to a literal or [label] assuming signed 
+                                    |   values.
+- | ---- | ----       | CUS Ry, RL  | Compare Ry, assuming it is signed, to RL, which is
+                                    |   assumed to be unsigned. Replaced by CUR or CUW
+                                    |   depending on RL type. (Alias: CMPUS).
+1 | 0x1d | 0xYX       | CUR Ry, Rx  | Compare Ry to Rx assuming Ry is signed, and Rx is not.
+2 | 0x1e | 0xY0 0x16N | CUW Ry, L   | Compare Ry (signed) to an unsigned literal or [label].
+3 | 0x1f | 0x0D 0xADR | JMP ADR     | Unconditional jump of PC to the 32 bit address A.
+3 | 0x20 | 0xYX       | JMA Ry, Rx  | Unconditional jump of PC to the 32 bit address held in
+                                    |   Ry:Rx. Can be combined with other jumps to jump to
+                                    |   arbitrary points in memory not known at compile time
+                                    |   (Aliases: JMPADR, JMPA, JAM).
+3 | 0x21 | 0x0D 0xADR | JIE ADR     | Jump to 32 bit address 32N if the value of FF
+                                    |   indicates the previous comparison resulted in an
+                                    |   equal flag. (Alias: JE).
+3 | 0x22 | 0x0D 0xADR | JNE ADR     | Jump if not equal to.
+3 | 0x23 | 0x0D 0xADR | JIG ADR     | Jump if greater than.
+3 | 0x24 | 0x0D 0xADR | JIL ADR     | Jump if less than.
+3 | 0x25 | 0x0D 0xADR | JLE ADR     | Jump if less than or equal to.
+3 | 0x26 | 0x0D 0xADR | JGE ADR     | Jump if greater than or equal to.
+3 | 0x27 | 0x0D 0xADR | JIC ADR     | Jump if CC does not equal 0. (Alias: JC).
+3 | 0x28 | 0x0D 0xADR | JNC ADR     | Jump if CC is equal to 0x0000 (0).
+3 | 0x29 | 0x0D 0xADR | CAL ADR     | Same as jump, but the current PC is stored in FP,
+                                    |   (Alias: CALL)
+1 | 0x2a | 0x00       | RET         | Same as jump, but the address is retrieved from FP and
+                                    |   incremented by 1 before jumping to it.
+1 | 0x2b | 0xY0       | INC Ry      | Increments the value of Ry by 1. Overflow is handled
+                                    |   the same way as ADD.
+1 | 0x2c | 0xY0       | DEC Ry      | Decrements the value of Ry by 1. Underflow is handled
+                                    |   the same way as SUB.
+1 | 0x2d | 0xY0       | PSH Ry      | Pushes the value in Ry onto the stack at SP+BP+1, then
+                                    |   increments BP by 1. (Alias: PUSH).
+1 | 0x2e | 0xY0       | POP Ry      | Retrieves the value located at SP+BP in Ry, then
+                                    |   decrements BP by 1.
+1 | 0x2f | 0xYX       | SBP Ry, Rx  | Sets the stack base pointer to Ry:Rx.
+1 | 0x30 | 0xYX       | LBP Ry, Rx  | Sets Ry to the MSB of BP and Rx to the LSB of BP.
+1 | 0x31 | 0xYX       | SSP Ry, Rx  | Sets the stack pointer to Ry:Rx.
+1 | 0x32 | 0xYX       | LSP Ry, Rx  | Sets Ry to the MSB of SP and Rx to the LSB of SP.
+3 | 0x33 | 0xYR 0x32N | LSA Ry,L    | Sets Ry:Ry+1 to SP+BP+L assuming L is a signed number.
+                                    |   (Aliases: LODSA, LODSADR).
+3 | 0x34 | 0xYR 0x32N | S32 Ry,L    | Sets Ry:Ry+1 to L. (Aliases: SET32, SDW).
+2 | 0xEF | 0x00 0x16N | SYS L       | Call the system to perform a function. The syscall
+                                    |   table is defined by the OS, if there is one. Only 
+                                    |   literals should be used here.
+
++- Ring 0 only (0xF0 through 0xFE) --------------------------------------------------------+
+
+1 | 0xF0 | 0xYX       | LPC Ry, Rx  | Sets Ry to the MSB of PC and Rx to the LSB of PC.
+1 | 0xF1 | 0xYX       | SPC Ry, Rx  | Sets the program counter to the address Ry:Rx.
+1 | 0xF2 | 0xYX       | SVR Ry, Rx  | Save all registers to a buffer at address Ry:Rx.
+1 | 0xF3 | 0xYX       | RSR Ry, Rx  | Restore all registers from a buffer at address Ry:Rx.
+1 | 0xF4 | 0xYX       | LFP Ry, Rx  | Sets Ry to the MSB of FP and Rx to the LSB of FP.
+1 | 0xF5 | 0xYX       | SFP Ry, Rx  | Sets FP to Ry:Rx.
+
++- Ring 0/1 only (0xFF) -------------------------------------------------------------------+
+
+1 | 0xFF | 0x00       | INT         | Send the interpreter an interrupt. See the interrupt
+                                    |   table below.
++------------------------------------------------------------------------------------------+
+
+    To make writing the assembler easier, I've grouped registers together by how their
+machine code representation is formatted. VAL is the byte identifying the instruction, and
+always occupies nibbles 1 and 2.
+
++------------------------------------------------------------------------------------------+
+Formatting Types | Signature | Desc
++------------------------------------------------------------------------------------------+
+
+Type 0           | VAL 0x00       | The default type. Examples include NOP and INT.
+Type 1           | VAL 0xYX       | Most instructions fall in this category. Nibble 3
+                                  |     represents the first register (between 0 and F), and
+                                  |     nibble 4 represents the second.
+Type 2           | VAL 0xY0       | Usually simple operations on a single register. Nibble
+                                  |     3 represents the register operand.
+Type 3           | VAL 0xY0 0x16N | Often involves literals. Nibble 3 is the register,
+                                  |     bytes 3 and 4 are the 16 bit number.
+Type 4           | VAL 0xYS 0xADR | Usually used for loading things to/from addresses.
+                                  |     Nibble 3 is the register, the two most significant
+                                  |     bits of nibble 4 represent whether to use the MSB,
+                                  |     LSB, or both from either the register or the word
+                                  |     at address ADR (depending on the operation), the
+                                  |     least significant bit of nibble 4 indicates whether
+                                  |     ADR is 16 or 32 bits, and bytes 3, 4, 5, and 6.
+                                  |     represent the address to be used by the operation.
+Type 5           | VAL 0xYS 0x00  | Used in operations involving three registers. Nibble 3 
+                            0xWX  |     is the first register, nibble 4 is the msb switch
+                                  |     (S), nibble five and six are 0 for word alignment,
+                                  |     nibble 7 is the second register, and nibble 8 is
+                                  |     the third.
+Type 6           | VAL 0x0D 0xADR | Typically used for jumps. The least significant bit of
+                                  |     nibble 4 indicates if ADR is 16 or 32 bits. Note
+                                  |     that 32 bits (4 bytes) are always used, and the
+                                  |     flag is intended for the interpreter to know whether
+                                  |     or not the ignore the two most significant bytes.
+Type 7           | VAL 0xYR 0x32N | Typically used for dealing with non-arbitrary 32 bit
+                                  |     addresses. Nibble 3 is the first register, nibble 4
+                                  |     indicates if the 32 bit number is a relocatable 
+                                  |     address or a literal. Bytes 3 through 6 represent 
+                                  |     the 32 bit address.
+Type 8           | -------------- | Anything not falling into the above categories.
+
++------------------------------------------------------------------------------------------+
+
+    The main purpose of interrupts is to gain basic functionality (write characters to the 
+screen, read input from the keyboard, etc.) from the interpreter. These can only be invoked
+in ring 0 or 1 mode; user mode programs should use syscalls. All interrupts return 0x0000 to
+R0 upon success, or 0xFFFF as a generic error (more specific error codes may be returned as
+well).
+
++------------------------------------------------------------------------------------------+
+Software Interrupts
++------------------------------------------------------------------------------------------+
+Register 0 | Other Registers               | Desc
++------------------------------------------------------------------------------------------+
+
+NO COMMAND
+0x0000     |                               | No command.
+
+PAUSE
+0x0001     | R1: Time in seconds           | Pauses the vCPU for (R1*1000)+R2 milliseconds.
+           | R2: Time in milliseconds      | Timing is not guarenteed to be perfect.
+
+WRITE TO DEVICE
+0x0002     | R1: Pointer to buffer (MSB)   | Writes bytes from a buffer at R1:R2 of length
+           | R2: Pointer to buffer (LSB)   | R3 to the device R4 at position R5:R6.
+           | R3: Length of buffer          | Positioning is always absolute.
+           | R4: Device ID                 | 
+           | R5: Position (MSB)            |
+           | R6: Position (LSB)            |
+
+READ FROM DEVICE
+0x0003     | R1: Pointer to buffer (MSB)   | Reads R3 bytes into a buffer at R1:R2 from
+           | R2: Pointer to buffer (LSB)   | device R4 at position R5:R6.
+           | R3: Length of buffer          | Positioning is always absolute.
+           | R4: Device ID                 |
+           | R5: Position (MSB)            |
+           | R6: Position (LSB)            |
+
+RUN AS RING
+0x0004     | R1: Function pointer (MSB)    | Jump to address R1:R2 automatically after
+           | R2: Function pointer (LSB)    | R5:R6 instructions are performed. Useful for
+           | R3: Ring (0-2)                | both multiprogramming and hardware protection.
+           | R4: Device ID                 | Once R5:R6 instructions have been executed, the
+           | R5: Instruction count (MSB)   | real address is stored in FP, and PF is
+           | R6: Instruction count (LSB)   | returned to the ring it was prior.
+           | R7: Pointer to buffer (MSB)   | If this is called from Ring 1, only 1 or 2 are
+           | R8: Pointer to buffer (LSB)   | valid values for R3. Invalid values always
+           |                               | result in ring 2 (usermode).
+           |                               | If R3 is ring 1, R7:R8 may optionally point to
+           |                               | a buffer containing the device IDs of only
+           |                               | the devices the following instructions are
+           |                               | allowed to operate on. Use this to prevent
+           |                               | possibily malicious ring 1 instructions from
+           |                               | accessing devices it is not intended to. If
+           |                               | R8 is 0x0000, full access is assumed (!).
+           |                               | This may only be triggered once from each ring
+           |                               | until address R1:R2 is jumped back to.
+           |                               | Subsequent triggerings of this interrupt are
+           |                               | ignored until R1:R2 is jumped back to.
+
+GET DESCRIPTOR
+0x0005     | R1: Pointer to buffer (MSB)   | Get the descriptor of a device. The supplied
+           | R2: Pointer to buffer (LSB)   | buffer at R1 must be at least 255 bytes large.
+           | R3: Device ID                 | The first three bytes are a 16 bit ID followed
+           |                               | by a terminating zero, followed by an ASCII
+           |                               | human-readable description of the device.
+
+SET GFX MODE
+0x0006     | R1: Pointer to buffer (MSB)   | Sets the graphics mode of the interpreter. See
+           | R2: Pointer to buffer (LSB)   | graphic modes table below. Returns 0x0001 to
+           | R3: Graphics mode             | R0 if an out of memory error occurs, 0x0002 if
+           |                               | an error reading the buffer occurs, and 0x0003
+           |                               | if the GFX mode isn't supported by the screen.
+           |                               | If the GFX mode doesn't require a buffer, R1:R2
+           |                               | is ignored.
+
+UPDATE DEVICE
+0x0007     | R1: Device ID                 | Requests the device to update. Depending on the
+           |                               | device, this may be ignored.
+
+DEFINE SYSCALLS
+0x0008     | R1: Pointer to buffer (MSB)   | Defines the syscall table by pointing to a
+           | R2: Pointer to buffer (LSB)   | buffer of function pointers. See syscall buffer
+           |                               | format entry below. The buffer must stay in
+           |                               | memory.
+
+REDIRECT MEMORY
+0x0009     | R1: 32 bit address (MSB)      | Redirect calls to main memory while in usermode
+           | R2: 32 bit address (LSB)      | to another device and/or address. Makes virtual
+           | R3: Device ID                 | memory easy. Does not apply to ring 0/1.
+           |                               | Set R1:R2 to 0x00000000 and R3 to 0x0000 to
+           |                               | stop redirecting memory.
+           |                               | Note that ring 2 code will not be aware of a
+           |                               | difference between being redirected or not.
+
+PROTECT MEMORY
+0x000a     | R1: 32 bit address (MSB)      | Set an acceptable memory address range for use
+           | R2: 32 bit address (LSB)      | while in ring 2. Note that this corresponds
+           | R3: Device ID                 | to the REAL addresses, not the redirected
+           | R4: 32 bit address (MSB)      | addresses usermode instructions would access
+           | R5: 32 bit address (LSB)      | while memory redirection is in use. A usermode
+           |                               | program attempting to address memory outside of
+           |                               | this range will cause a segmentation fault.
+
+SCALE IMAGE
+0xFFFC     | R1: Pointer to buffer (MSB)   | Speed hack requesting the host CPU scale an 
+           | R2: Pointer to buffer (LSB)   | image defined in a buffer at R1:R2 from size
+           | R3: Source width              | R3xR4 to size R5xR6, and store the result
+           | R4: Source height             | in a buffer at R7:R8. The interpreter may
+           | R5: Target width              | optionally apply interpolation where
+           | R6: Target height             | R9 = 0 = no interpolation (nearest neighbor)
+           | R7: Pointer to buffer (MSB)   | R9 = 1 = bilinear
+           | R8: Pointer to buffer (LSB)   | R9 = 2 = sinc or lanczos
+           | R9: Interpolation             | R9 = 3 = hqx
+           |                               | However, the interpreter may choose to ignore
+           |                               | these scaling modes and only use nearest.
+
+BLIT IMAGE
+0xFFFD     | R1: Pointer to buffer (MSB)   | Speed hack requesting the host CPU blit an
+           | R2: Pointer to buffer (LSB)   | image of size R3xR4 onto the screen buffer at
+           | R3: Width of image            | R5xR6. Because alpha colors are not defined in
+           | R4: Height of image           | any RGB format below, an alpha color of up to
+           | R5: X                         | 24 bits may be defined in R7:R8. If a color
+           | R6: Y                         | palette is being used rather than RGB, just use
+           | R7: Alpha Color (MSB)         | R8. The image buffer is located at R1:R2.
+           | R8: Alpha Color (LSB)         | R5 (X) and R6 (Y) are assumed to be signed.
+
+DRAW TRIANGLE
+0xFFFE     | R1: Pointer to buffer (MSB)   | Speed hack requesting the host CPU draw and
+           | R2: Pointer to buffer (LSB)   | blit a triangle defined in the buffer at R1:R2
+           | R3: Color (MSB)               | filled with the color defined in R3:R4. Like 
+           | R4: Color (LSB)               | above, R3:R4 can be a color of up to 24 bits
+           |                               | in depth, or R4 can reference a palette color.
+
+DRAW TEXTURED TRIANGLE
+0xFFFF     | R1: Pointer to buffer (MSB)   | Like above, but a textured triangle with the
+           | R2: Pointer to buffer (LSB)   | texture located at buffer R3:R4. The texture
+           | R3: Pointer to buffer (MSB)   | is expected to be an array of pixels in the
+           | R4: Pointer to buffer (LSB)   | format expected by the current graphics mode.
+           | R5: Width of texture          |
+           | R6: Height of texture         |
++------------------------------------------------------------------------------------------+
+
+    Character streams to and from the vCPU are all handled by the interpreter. Programs
+inside the vCPU shouldn't have any concept of a system bus. Apart from the following hard-
+coded values, it is up to interpreter to identify external hardware and deliver the vCPU
+a device ID that programs can interpret. Note: only relevant in kernel mode; if an OS is
+running inside the vCPU, typical UNIX "files" should be provided by the vCPU.
+
++------------------------------------------------------------------------------------------+
+Device Table
++------------------------------------------------------------------------------------------+
+Device ID  | Description (253 character max)
++------------------------------------------------------------------------------------------+
+0x0000     | MAIN MEMORY
+0x0001     | SCREEN BUFFER
+0x0002     | KEYBOARD INPUT QUEUE
+0x0003     | ACTIVE INPUTS
+0x....
+0x...n     | Free device input slots.
++------------------------------------------------------------------------------------------+
+
+    MAIN MEMORY is as it sounds; it is the primary memory, usually RAM, presented to the
+vCPU. It can be read from and written to via interrupts in kernel mode if desired; useful
+for writing entire buffers rather than single words. Just keep in mind that memory is seen
+by the vCPU in words (2 bytes), while a buffer is a linear array of single bytes; be mindful
+of word alignment and leading zeroes.
+    The SCREEN BUFFER is a linear array pixels (refer to pixel format table below) that can
+be written to display something on the screen. After writing data to the screen buffer,
+trigger the update device interrupt to swap it out of the buffer and onto the screen.
+    The KEYBOARD INPUT QUEUE contains up 32 of the last ASCII keys pressed by the keyboard, 
+in the order of First In, First Out. Once this device is read, the keys are cleared.
+    ACTIVE INPUTS is to make real-time input easier. When read at any given time, it will
+contain up to sixteen ASCII characters that are currently pressed on the keyboard. Getting
+input through other fashions is perfectly possible through the KEYBOARD INPUT QUEUE or 
+custom devices not provided by default.
+
+    As far as the vCPU is concerned, the screen is always just a linear array of bytes to
+write to. It's the interpreters job to turn that into an actual display. The interpreter
+handles VRAM; this makes it easier for the vCPU to switch modes without having to reboot.
+However, keep in mind, the interpreter may choose to reserve a portion of main memory for
+VRAM iF there is no external VRAM available. This may result in out-of-memory errors; 
+programs in the vCPU should be prepared to handle this if they cannot guarentee enough 
+memory is free.
+    The equation for the size of the screen buffer is simply Width*Height*ColorDepth, where
+Width and Height are in pixels, and ColorDepth is the number of bytes it takes to represent
+a single pixel (or in some graphic modes, a single character).
+
++------------------------------------------------------------------------------------------+
+Graphic modes
++------------------------------------------------------------------------------------------+
+R3         | Desc
++------------------------------------------------------------------------------------------+
+0x0000     | No display.
+
+0x0001     | 40x30 Character Display mode.
+           | The screen buffer device becomes a linear array of 1,200 bytes (ASCII expected)
+           | that are used to create a 40x30 ASCII character display. Therefore, the 0th
+           | byte is the character cell at position (0,0), the 20th byte is the character
+           | cell at (20,0), the 40th byte is the character cell at (0,1), and so on. Thus
+           | the equation to access any arbitrary character cell is Position=(Y*Width)+X.
+           | In this case, the width is 40, and X may be no greater than 29 (since we start
+           | at 0). The screen buffer works the same way in all graphic modes, except the
+           | width and height of the screen may vary, and pixels of a particular format
+           | are expected as opposed to ASCII characters.
+           | This is the default mode.
+
+0x0002     | Variable Resolution Character Display mode. Supply a buffer of two words (four
+           | bytes), where the first word defines the width in characters and the second
+           | word defines the height in characters. This buffer does not need to remain in
+           | memory after the interrupt is triggered.
+
+0x0003     | 320x200 16 color mode. A buffer of 48 bytes should be supplied to define a
+           | 16 color palette. Each color consists of three bytes (one red, one green, one
+           | blue) (16*3=48). Note that this buffer must remain in memory so long as the
+           | vCPU is in this graphics mode. 320x200 was chosen for a few reasons, namely for
+           | compatibility with VGA, and the ability to fit the palette and screen buffer
+           | in the upper 32k of memory, thus reducing the number of read/write cycles
+           | needed to access it. This mode is best for 8-bit host CPUs.
+
+0x0004     | 320x240 16 color mode. Same as above but with extra vertical resolution. Best
+           | for displays that have accessible VRAM, so a screen buffer doesn't have to be
+           | kept in main memory. For example, screens with an ILI9340 driver have static
+           | RAM accessible via SPI for this purpose.
+
+0x0005     | 320x200 256 color mode. Similar to above, a buffer of 256*3 (768) bytes should
+           | be supplied to define a color palette. 320x200 was chosen for VGA compatibility
+           | and the ability to keep a screen buffer and palette in the upper 64k of memory.
+
+0x0006     | 320x240 256 color mode. Like the other 320x240 mode, this is best used with
+           | external VRAM.
+
+0x0007     | Variable resolution 16 color mode. A 52 byte buffer should be provided; the
+           | first word (2 bytes) defines the horizontal resolution, and the second word
+           | defines the the vertical resolution. The remaining 48 bytes are a color palette
+           | define the same way as other 16 color modes.
+
+0x0008     | Variable resolution 256 color mode. A 772 byte buffer should be provided; like
+           | above, the first two words (four bytes) define the resolution, and the
+           | remaining 768 bytes define the 256 color palette.
+
+0x0009     | Variable resolution 8-bit RGB color mode. A four byte buffer should be provided
+           | defining the resolution, with the most significant two bytes representing the
+           | horizontal resolution, and the least significant two bytes representing the
+           | vertical resolution. Unlike the color palette buffers, this buffer does not
+           | need to remain in memory, as the interpreter will store it.
+
+0x000a     | Variable resolution 16-bit RBG color mode. Supply a four byte buffer defining
+           | the resolution, like above.
+
+0x000b     | Variable resolution 24-bit RGB color mode. Supply a four byte buffer defining
+           | the resolution, like above.
+
++------------------------------------------------------------------------------------------+
+
+    The below pixel formats define how pixels should be represented within buffers for given
+graphic modes.
+
++------------------------------------------------------------------------------------------+
+Pixel formats
++------------------------------------------------------------------------------------------+
+Mode             | Format
++------------------------------------------------------------------------------------------+
+16 color modes   | 1 byte represents two pixels mapped to a 3 byte RGB color palette.
+                 | The most signifcant nibble represents the first pixel, the least
+                 | signifcant the second.
+
+256 color modes  | 1 byte represents one pixel mapped to a 3 byte RGB color palette.
+
+8-bit RGB modes  | 1 byte represents one RGB pixel. The first three bits are the red value,
+                 | the second three bits are the green value, and the last two bits are the
+                 | blue value.
+
+16-bit RGB modes | 2 bytes (one word) represent one RGB pixel. The first six bits are red,
+                 | the next five are green, and the last five are blue.
+
+24-bit RGB modes | 3 bytes represent one RGB pixel. The first byte represents the red value,
+                 | the second green, and the third blue.
++------------------------------------------------------------------------------------------+
+
+    To use the speed hack interrupts for triangle drawing, the triangles must be defined in
+one of the formats below. All X and Y values (including those for UVs) are assumed to be
+signed. Note that the triangles do not have a Z dimension; if 3D triangles are to be used,
+the projection matrix must already be applied.
+
++------------------------------------------------------------------------------------------+
+Triangle formats
++------------------------------------------------------------------------------------------+
+Type                | Desc
++------------------------------------------------------------------------------------------+
+Untextured Triangle | One word (two bytes) for X, and one word for Y define each vertex.
+                    | This results in a buffer of 12 words (24 bytes).
+                    | 0xX1X1X1X1 0xY1Y1Y1Y1 0xX2X2X2X2 0xY2Y2Y2Y2 0xX3X3X3X3 0xY3Y3Y3Y3
+
+Textured triangle   | One word for X, one word for Y, one word for UVx, one word for UVy
+                    | define each vertex and its texture mapping. This results in a buffer
+                    | of 24 words (48 bytes).
+                    | 0xX1X1X1X1 0xY1Y1Y1Y1 0xU1U1U1U1 0xV1V1V1V1
+                    | 0xX2X2X2X2 0xY2Y2Y2Y2 0xU2U2U2U2 0xV2V2V2V2
+                    | 0xX3X3X3X3 0xY3Y3Y3Y3 0xU3U3U3U3 0xV3V3V3V3
++------------------------------------------------------------------------------------------+
+
++------------------------------------------------------------------------------------------+
+Syscall table buffer format
++------------------------------------------------------------------------------------------+
+The syscall table buffer is simply a collection of 32 bit function pointers. Each syscall's 
+number will then correspond to the 32 bit index of the function pointer. For example, 
+syscall 0 will be the function pointer starting at byte 0, syscall 1 will be the function 
+pointer starting at byte 4 (32 bit index 1), syscall 2 will be the function pointer starting
+at byte 8 (32 bit index 2), and so on. It is up to the OS to define how information should 
+be passed when these functions are called.
++------------------------------------------------------------------------------------------+
