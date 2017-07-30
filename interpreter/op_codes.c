@@ -1,9 +1,12 @@
 #include <stdlib.h>
 #include "op_codes.h"
 
+#define NOERR 0
+#define ERR -1
+
 int initialize_valid_instructions()
 {
-    valid_instructions = (op_instr*) calloc (NUM_INSTRUCTIONS, sizeof(op_isntr));
+    valid_instructions = (op_instr*) calloc (NUM_INSTRUCTIONS, sizeof(op_instr));
 
     for (int i = 0; i < NUM_INSTRUCTIONS; i++)
     {
@@ -57,7 +60,7 @@ int initialize_valid_instructions()
     return NOERR;
 }
 
-mnemonic* get_instruction_by_value(uint8_t value)
+op_instr* get_instruction_by_value(uint8_t value)
 {
-    return &valid_instructions[i];
+    return &(valid_instructions[value]);
 }

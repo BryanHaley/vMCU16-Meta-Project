@@ -166,13 +166,18 @@ Basic Opcodes (0x00 through 0xEF)
 3 | 0x15 | 0xYS 0xADR | LOD RyS,ADR | Load a word from the address ADR into Ry. If S is not
                                     |   0b0011, S indicates whether to load the MSB or LSB
                                     |   of the word into the LSB of Ry. (Alias: LOAD).
-3 | 0x16 | 0xYS 0xADR | STR RyS,ADR | Store a word from Ry in the address ADR.
+3 | 0x16 | 0xYS 0xADR | STR RyS,ADR | Store a word from Ry in the address ADR. If S is not
+                                    |   0b0011, the least significant byte of Ry will be
+                                    |   loaded into either the MSB or LSB of the word at
+                                    |   address ADR depending on S.
 2 | 0x17 | 0xYS 0x00  | LAA RyS,    | Sets Ry to the word contained at the address Rw:Rx.
-                0xWX  |     Rw, Rx  |   (Aliases: LODAADR, LOADAADR). S indicates whether
-                                    |   to use the MSB, LSB, or both bytes of both the
-                                    |   register and the word at address Rw:Rx.
+                0xWX  |     Rw, Rx  |   (Aliases: LODAADR, LOADAADR). If S is not 0b0011,
+                                    |   S indicates whether to load the MSB or LSB of the
+                                    |   word at Rw:Rx into the LSB of Ry.
 2 | 0x18 | 0xYS 0x00  | SAA RyS,    | Sets the word at Rw:Rx to the value of Ry.
-                0xWX  |     Rw, Rx  |   (Alias: STRAADR).
+                0xWX  |     Rw, Rx  |   (Alias: STRAADR). If S is not 0b0011, S indicates
+                                    |   whether to load the LSB of Ry into the MSB or LSB
+                                    |   of the word at address Rw:Rx.
 - | ---- | ----       | CMP Ry, RL  | Compare Ry to RL. If they're equal, FF is set to 0x00.
                                     |   If Ry is greater than RL, FF is set to 0x01.
                                     |   If Ry is less than RL, FF is set to 0x02.
@@ -300,8 +305,8 @@ Software Interrupts
 Register 0 | Other Registers               | Desc
 +------------------------------------------------------------------------------------------+
 
-NO COMMAND
-0x0000     |                               | No command.
+STOP
+0x0000     |                               | Ends the interpreter process on the host CPU.
 
 PAUSE
 0x0001     | R1: Time in seconds           | Pauses the vCPU for (R1*1000)+R2 milliseconds.
@@ -594,6 +599,5 @@ The syscall table buffer is simply a collection of 32 bit function pointers. Eac
 number will then correspond to the 32 bit index of the function pointer. For example, 
 syscall 0 will be the function pointer starting at byte 0, syscall 1 will be the function 
 pointer starting at byte 4 (32 bit index 1), syscall 2 will be the function pointer starting
-at byte 8 (32 bit index 2), and so on. It is up to the OS to define how information should 
 be passed when these functions are called.
 +------------------------------------------------------------------------------------------+

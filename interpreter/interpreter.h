@@ -14,15 +14,19 @@
 #define SINGLE_WORD_REG 1
 #define WORD_BYTES 2
 
+#define SYS_CALL_INSTR 8
+
+int quit;
+
 uint16_t* main_memory;
 uint32_t memory_size;
 
-int fetch();
+op_instr* fetch();
 int decode();
 int execute();
 
 uint8_t* fetched_instr_code;
-op_str* fetched_instruction;
+op_instr* fetched_instruction;
 
 int initialize_registers();
 
@@ -64,16 +68,17 @@ typedef struct
 {
     uint8_t value;
     int reg_dest;
-    int reg_source;
     int msb_switch;
     int address_flag;
     int relocatable;
+    uint32_t address;
 } format_4_instr_t;
 
 typedef struct
 {
     uint8_t value;
     int reg_dest;
+    int reg_dest_2;
     int reg_msw;
     int reg_lsw;
     int msb_switch;
@@ -94,14 +99,14 @@ typedef struct
     uint8_t value;
     int reg_dest;
     int relocatable;
-    uint32_t num_operand;
+    uint32_t num;
 } format_7_instr_t;
 
 //Format 8 instructions each get their own struct
 
 typedef struct
 {
-    uint16_t num_operand;
+    uint16_t num;
 } sys_instr_t;
 
 void* next_instruction;

@@ -12,10 +12,11 @@ int initialize()
     external_offset = 0xFFFFFFFF;
 
     //This is temporary; only for testing purposes
-    open_source_file("../asm_examples/helloworld.asm");
-    open_isf_file("../asm_examples/helloworld.isf");    
+    open_source_file("../meta/asm_examples/helloworld.asm");
+    open_isf_file("../meta/asm_examples/helloworld.isf");    
 
     //In the future this method will interpret command line options from argv
+    return NOERR;
 }
 
 //Initialize, then run both passes (see .h file)
@@ -33,8 +34,8 @@ int main (int argc, char* argv[])
     close_isf_file();
 
     //temporary
-    open_source_file("../asm_examples/helloworld.isf");
-    open_object_file("../asm_examples/helloworld.o");
+    open_source_file("../meta/asm_examples/helloworld.isf");
+    open_object_file("../meta/asm_examples/helloworld.o");
 
     if (passtwo() < NOERR)
     {
