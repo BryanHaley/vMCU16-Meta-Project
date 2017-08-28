@@ -4,25 +4,46 @@
 #include "assembler.h"
 #include "assembler_utils.h"
 #include "assembler_mnemonics.h"
-
-int initialize()
-{
-    initialize_valid_mnemonics();
-
-    external_offset = 0xFFFFFFFF;
-
-    //This is temporary; only for testing purposes
-    open_source_file("../meta/asm_examples/helloworld.asm");
-    open_isf_file("../meta/asm_examples/helloworld.isf");    
-
-    //In the future this method will interpret command line options from argv
-    return NOERR;
-}
+#include "assembler_options.h"
 
 //Initialize, then run both passes (see .h file)
 int main (int argc, char* argv[])
 {
-    initialize();
+    initialize_valid_mnemonics();
+    initialize_default_options();
+
+    for (int i = 1; i < argc; i++)
+    {
+        char* ext = strrchr(argv[i], '.');
+        
+        if (argv[i][0] == '-')
+        {
+            parse_option(argv[i]);
+        }
+
+        else if (ext && strcmp(ext, ".asm") == 0)
+        {
+            char* source_file_str = argv[i];
+            char* object_file_str = calloc(1, strlen(source_file_str)-2);
+            memcpy(object_file_str, source_file_str, strlen(source_file_str)-4);
+            strncat(object_file_str, ".o", strlen(source_file_str)-2);
+            assemble(source_file_str, object_file_str);
+        }
+    }
+
+    return NOERR;
+}
+
+int assemble(char* source_file_str, char* object_file_str)
+{
+    external_offset = 0xFFFFFFFF;
+
+    char* isf_file_str = calloc(1, strlen(source_file_str));
+    memcpy(isf_file_str, source_file_str, strlen(source_file_str)-4);
+    strncat(isf_file_str, ".isf", strlen(source_file_str));
+    
+    open_source_file(source_file_str);
+    open_isf_file(isf_file_str);    
 
     if (passone() < NOERR)
     {
@@ -33,9 +54,8 @@ int main (int argc, char* argv[])
     close_source_file();
     close_isf_file();
 
-    //temporary
-    open_source_file("../meta/asm_examples/helloworld.isf");
-    open_object_file("../meta/asm_examples/helloworld.o");
+    open_source_file(isf_file_str);
+    open_object_file(object_file_str);
 
     if (passtwo() < NOERR)
     {
@@ -45,6 +65,9 @@ int main (int argc, char* argv[])
     
     close_object_file();
     close_source_file();
+
+    if (!(*assembler_keep_isf))
+    { remove(isf_file_str); }
 
     return NOERR;
 }
